@@ -1,17 +1,20 @@
 import os
 import json
 import base64
-import requests
-
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-from PIL import Image
+import logging
 from io import BytesIO
+
+import requests
+from dotenv import load_dotenv
+from flask import Flask, jsonify, request
+from flask_cors import CORS
+from PIL import Image, UnidentifiedImageError
+
+load_dotenv()
 
 app = Flask(__name__)
 
-app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024
-
+# Allow your GitHub Pages frontend to access this backend.
 CORS(
     app,
     resources={
@@ -23,134 +26,228 @@ CORS(
     }
 )
 
+app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024
+
+# Configure Gemini through Render environment variables.
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.getenv(
+    "GEMINI_MODEL",
+    "gemini-3.8-flash"
+)
+
+GEMINI_URL = (
+    "https://generativelanguage.googleapis.com/"
+    "v1beta/models/"
+    + GEMINI_MODEL
+    + ":generateContent"
+)
+
+STYLES = {
+    "Casual": "casual and natural",
+    "Funny": "funny and playful",
+    "Aesthetic": "aesthetic and minimal",
+    "Romantic": "romantic and emotional",
+    "Professional": "professional and polished"
+}
 
 
-@app.route("/", methods=["GET"])
+@app.get("/")
 def home():
     return jsonify({
-        "message": "SnapVoice AI Gemini backend is running!"
+        "message": "SnapVoice AI Gemini backend is running!",
+        "model": GEMINI_MODEL
     })
 
 
-@app.route("/generate", methods=["POST"])
+@app.get("/health")
+def health():
+    return jsonify({
+        "status": "ok",
+        "message": "Backend is running."
+    })
+
+
+@app.errorhandler(413)
+def file_too_large(error):
+    return jsonify({
+        "error": "Image must be smaller than 5 MB."
+    }), 413
+
+
+@app.post("/generate")
 def generate():
+
     if not GEMINI_API_KEY:
         return jsonify({
-            "error": "Gemini API key is missing in Render."
+            "error": (
+                "Gemini API key is missing. "
+                "Add GEMINI_API_KEY in Render Environment."
+            )
         }), 500
 
-    if "photo" not in request.files:
+    photo = request.files.get("photo")
+
+    if not photo:
         return jsonify({
             "error": "Please upload a photo."
         }), 400
 
-    photo = request.files["photo"]
-    style = request.form.get("style", "aesthetic")
+    style_name = request.form.get("style", "Casual")
 
-    if not photo.filename:
-        return jsonify({
-            "error": "Please select an image."
-        }), 400
+    style = STYLES.get(
+        style_name,
+        STYLES["Casual"]
+    )
 
+    personal_example = request.form.get(
+        "personal_example", ""
+    ).strip()[:500]
+
+    # Validate and prepare the uploaded image.
     try:
-        image_bytes = photo.read()
+        image = Image.open(photo.stream)
 
-        if not image_bytes:
+        if image.format not in ("JPEG", "PNG", "WEBP"):
             return jsonify({
-                "error": "The uploaded image is empty."
+                "error": "Only JPG, PNG and WEBP images are supported."
             }), 400
 
-        # Validate the image and determine its actual format.
-        with Image.open(BytesIO(image_bytes)) as image:
-            image_format = image.format
-            image.verify()
+        image.verify()
 
-        mime_types = {
-            "JPEG": "image/jpeg",
-            "PNG": "image/png",
-            "WEBP": "image/webp"
-        }
+        photo.stream.seek(0)
 
-        if image_format not in mime_types:
-            return jsonify({
-                "error": "Please upload a JPG, PNG, or WEBP image."
-            }), 400
+        image = Image.open(photo.stream).convert("RGB")
+        image.thumbnail((1024, 1024))
 
-        mime_type = mime_types[image_format]
+        buffer = BytesIO()
 
-        encoded_image = base64.b64encode(
-            image_bytes
-        ).decode("utf-8")
-
-        prompt = f"""
-You are SnapVoice AI, an assistant that creates social media
-content from photos.
-
-Analyze the uploaded image and generate content in this style:
-{style}
-
-Return ONLY a valid JSON object with these four fields:
-
-{{
-  "caption": "A suitable caption for the photo",
-  "hashtags": "#tag1 #tag2 #tag3",
-  "description": "A factual description of the visible image",
-  "song": "A suitable song suggestion"
-}}
-
-Requirements:
-- Make the caption relevant to the actual image.
-- Make the hashtags relevant to the image.
-- Describe only things that can reasonably be seen.
-- Suggest a song that matches the mood of the image.
-- Do not include Instagram upload or publishing instructions.
-- Return JSON only.
-"""
-
-        api_url = (
-            "https://generativelanguage.googleapis.com/"
-            f"v1beta/models/{GEMINI_MODEL}:generateContent"
+        image.save(
+            buffer,
+            format="JPEG",
+            quality=85
         )
 
-        payload = {
-            "contents": [
-                {
-                    "parts": [
-                        {"text": prompt},
-                        {
-                            "inline_data": {
-                                "mime_type": mime_type,
-                                "data": encoded_image
-                            }
-                        }
-                    ]
-                }
-            ],
-            "generationConfig": {
-                "responseMimeType": "application/json",
-                "temperature": 0.7
-            }
-        }
+        encoded_image = base64.b64encode(
+            buffer.getvalue()
+        ).decode("utf-8")
 
+    except (
+        UnidentifiedImageError,
+        OSError,
+        ValueError
+    ):
+        return jsonify({
+            "error": "The uploaded file is not a valid image."
+        }), 400
+
+    # Instructions for the AI.
+    prompt = f"""
+You are SnapVoice AI, a photo-content assistant.
+
+Analyze the uploaded image and generate:
+
+1. caption: An engaging social media caption.
+2. hashtags: Five to ten relevant hashtags.
+3. description: An accurate description of the image.
+4. song: A suitable song suggestion or music genre,
+   with a short explanation of why it fits.
+
+Writing style: {style}
+
+User's writing examples:
+{personal_example}
+
+Rules:
+- Do not invent details that cannot be established
+  from the image.
+- Do not identify people in the image.
+- Return valid JSON only.
+- All four values must be strings.
+- Do not claim that a song is licensed or available
+  on a particular streaming service.
+
+Return exactly this JSON structure:
+
+{{
+  "caption": "Your caption",
+  "hashtags": "#tag1 #tag2 #tag3 #tag4 #tag5",
+  "description": "Your image description",
+  "song": "Song or music suggestion and explanation"
+}}
+"""
+
+    # Gemini API request.
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {
+                        "text": prompt
+                    },
+                    {
+                        "inline_data": {
+                            "mime_type": "image/jpeg",
+                            "data": encoded_image
+                        }
+                    }
+                ]
+            }
+        ],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "maxOutputTokens": 1200
+        }
+    }
+
+    try:
         response = requests.post(
-            api_url,
+            GEMINI_URL,
+            params={
+                "key": GEMINI_API_KEY
+            },
             headers={
-                "x-goog-api-key": GEMINI_API_KEY,
                 "Content-Type": "application/json"
             },
             json=payload,
-            timeout=60
+            timeout=90
         )
 
+        # Log errors without exposing the API key.
         if not response.ok:
-            print("Gemini API error:", response.status_code, response.text)
+            app.logger.error(
+                "Gemini API returned HTTP %s: %s",
+                response.status_code,
+                response.text[:1500]
+            )
+
+            if response.status_code == 429:
+                return jsonify({
+                    "error": (
+                        "Gemini request limit reached. "
+                        "Check your API quota and billing."
+                    )
+                }), 429
+
+            if response.status_code in (401, 403):
+                return jsonify({
+                    "error": (
+                        "Gemini API authentication failed. "
+                        "Check your API key and permissions."
+                    )
+                }), 502
+
+            if response.status_code == 404:
+                return jsonify({
+                    "error": (
+                        "Gemini model not found. "
+                        "Check GEMINI_MODEL in Render Environment."
+                    )
+                }), 502
 
             return jsonify({
                 "error": (
-                    "Gemini request failed. Check your API key, "
-                    "model availability, quota, and Render logs."
+                    "Gemini request failed. "
+                    "Check the Render application logs."
                 )
             }), 502
 
@@ -159,52 +256,90 @@ Requirements:
         candidates = result.get("candidates", [])
 
         if not candidates:
+            app.logger.error(
+                "Gemini returned no candidates."
+            )
+
             return jsonify({
-                "error": "Gemini did not return a result."
+                "error": (
+                    "Gemini returned no content. "
+                    "Please try another photo."
+                )
             }), 502
 
-        parts = candidates[0].get("content", {}).get("parts", [])
+        parts = candidates[0].get(
+            "content", {}
+        ).get("parts", [])
 
-        generated_text = "".join(
+        output_text = "".join(
             part.get("text", "")
             for part in parts
-        ).strip()
+            if isinstance(part.get("text"), str)
+        )
 
-        if not generated_text:
+        if not output_text.strip():
             return jsonify({
                 "error": "Gemini returned an empty response."
             }), 502
 
-        # Handle JSON returned by Gemini.
-        content = json.loads(generated_text)
+        # Convert the AI response into JSON.
+        data = json.loads(output_text)
+
+        required_fields = [
+            "caption",
+            "hashtags",
+            "description",
+            "song"
+        ]
+
+        for field in required_fields:
+            if (
+                not isinstance(data.get(field), str)
+                or not data[field].strip()
+            ):
+                raise ValueError(
+                    "Missing or invalid field: " + field
+                )
 
         return jsonify({
-            "caption": content.get("caption", ""),
-            "hashtags": content.get("hashtags", ""),
-            "description": content.get("description", ""),
-            "song": content.get("song", "")
+            field: data[field]
+            for field in required_fields
         })
 
-    except json.JSONDecodeError:
+    except requests.Timeout:
+        app.logger.exception("Gemini request timed out.")
+
         return jsonify({
-            "error": "Gemini returned an unexpected response format."
+            "error": (
+                "Gemini took too long to respond. "
+                "Please try again."
+            )
+        }), 504
+
+    except requests.RequestException:
+        app.logger.exception("Gemini connection failed.")
+
+        return jsonify({
+            "error": "Could not connect to Gemini."
         }), 502
 
-    except Exception as error:
-        print("Backend error:", str(error))
+    except (ValueError, json.JSONDecodeError):
+        app.logger.exception(
+            "Could not parse the Gemini response."
+        )
 
         return jsonify({
-            "error": "Something went wrong while processing the image."
-        }), 500
-
-
-@app.errorhandler(413)
-def file_too_large(error):
-    return jsonify({
-        "error": "Image is too large. Maximum size is 5 MB."
-    }), 413
+            "error": (
+                "Could not process the AI response. "
+                "Please try again."
+            )
+        }), 502
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    port = int(os.environ.get("PORT", 10000))
+
+    app.run(
+        host="0.0.0.0",
+        port=port
+    )
