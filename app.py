@@ -1,7 +1,9 @@
+
 import os
 import json
 import base64
 import logging
+import time
 from io import BytesIO
 
 import requests
@@ -12,9 +14,11 @@ from PIL import Image, UnidentifiedImageError
 
 load_dotenv()
 
+logging.basicConfig(level=logging.INFO)
+
 app = Flask(__name__)
 
-# Allow your GitHub Pages frontend to access this backend.
+# Allow GitHub Pages to access this backend.
 CORS(
     app,
     resources={
@@ -28,7 +32,7 @@ CORS(
 
 app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024
 
-# Configure Gemini through Render environment variables.
+# Gemini settings from Render Environment.
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv(
     "GEMINI_MODEL",
@@ -49,6 +53,9 @@ STYLES = {
     "Romantic": "romantic and emotional",
     "Professional": "professional and polished"
 }
+
+RETRYABLE_STATUSES = (429, 500, 502, 503, 504)
+MAX_ATTEMPTS = 3
 
 
 @app.get("/")
@@ -74,6 +81,68 @@ def file_too_large(error):
     }), 413
 
 
+def call_gemini(payload):
+    """Call Gemini and retry temporary errors and timeouts."""
+    last_response = None
+
+    for attempt in range(MAX_ATTEMPTS):
+        try:
+            response = requests.post(
+                GEMINI_URL,
+                params={"key": GEMINI_API_KEY},
+                headers={"Content-Type": "application/json"},
+                json=payload,
+                timeout=90
+            )
+
+            last_response = response
+
+            if response.ok:
+                return response, None
+
+            if response.status_code not in RETRYABLE_STATUSES:
+                return response, None
+
+            if attempt == MAX_ATTEMPTS - 1:
+                break
+
+            wait_seconds = 2 ** (attempt + 1)
+
+            app.logger.warning(
+                "Gemini returned HTTP %s. "
+                "Retrying in %s seconds (attempt %s of %s).",
+                response.status_code,
+                wait_seconds,
+                attempt + 2,
+                MAX_ATTEMPTS
+            )
+
+            time.sleep(wait_seconds)
+
+        except requests.Timeout:
+            if attempt == MAX_ATTEMPTS - 1:
+                return None, "timeout"
+
+            wait_seconds = 2 ** (attempt + 1)
+
+            app.logger.warning(
+                "Gemini timed out. Retrying in %s seconds.",
+                wait_seconds
+            )
+
+            time.sleep(wait_seconds)
+
+        except requests.RequestException:
+            app.logger.exception("Gemini connection failed.")
+
+            if attempt == MAX_ATTEMPTS - 1:
+                return None, "connection"
+
+            time.sleep(2 ** (attempt + 1))
+
+    return last_response, None
+
+
 @app.post("/generate")
 def generate():
 
@@ -93,11 +162,7 @@ def generate():
         }), 400
 
     style_name = request.form.get("style", "Casual")
-
-    style = STYLES.get(
-        style_name,
-        STYLES["Casual"]
-    )
+    style = STYLES.get(style_name, STYLES["Casual"])
 
     personal_example = request.form.get(
         "personal_example", ""
@@ -113,19 +178,13 @@ def generate():
             }), 400
 
         image.verify()
-
         photo.stream.seek(0)
 
         image = Image.open(photo.stream).convert("RGB")
         image.thumbnail((1024, 1024))
 
         buffer = BytesIO()
-
-        image.save(
-            buffer,
-            format="JPEG",
-            quality=85
-        )
+        image.save(buffer, format="JPEG", quality=85)
 
         encoded_image = base64.b64encode(
             buffer.getvalue()
@@ -140,7 +199,6 @@ def generate():
             "error": "The uploaded file is not a valid image."
         }), 400
 
-    # Instructions for the AI.
     prompt = f"""
 You are SnapVoice AI, a photo-content assistant.
 
@@ -176,14 +234,11 @@ Return exactly this JSON structure:
 }}
 """
 
-    # Gemini API request.
     payload = {
         "contents": [
             {
                 "parts": [
-                    {
-                        "text": prompt
-                    },
+                    {"text": prompt},
                     {
                         "inline_data": {
                             "mime_type": "image/jpeg",
@@ -199,66 +254,82 @@ Return exactly this JSON structure:
         }
     }
 
-    try:
-        response = requests.post(
-            GEMINI_URL,
-            params={
-                "key": GEMINI_API_KEY
-            },
-            headers={
-                "Content-Type": "application/json"
-            },
-            json=payload,
-            timeout=90
+    # Call Gemini with automatic retries.
+    response, failure = call_gemini(payload)
+
+    if failure == "timeout":
+        return jsonify({
+            "error": (
+                "Gemini timed out after several attempts. "
+                "Please try again shortly."
+            )
+        }), 504
+
+    if failure == "connection":
+        return jsonify({
+            "error": (
+                "Could not connect to Gemini after several attempts. "
+                "Please try again shortly."
+            )
+        }), 502
+
+    if response is None:
+        return jsonify({
+            "error": "Gemini did not return a response."
+        }), 502
+
+    if not response.ok:
+        app.logger.error(
+            "Gemini API returned HTTP %s: %s",
+            response.status_code,
+            response.text[:1000]
         )
 
-        # Log errors without exposing the API key.
-        if not response.ok:
-            app.logger.error(
-                "Gemini API returned HTTP %s: %s",
-                response.status_code,
-                response.text[:1500]
-            )
-
-            if response.status_code == 429:
-                return jsonify({
-                    "error": (
-                        "Gemini request limit reached. "
-                        "Check your API quota and billing."
-                    )
-                }), 429
-
-            if response.status_code in (401, 403):
-                return jsonify({
-                    "error": (
-                        "Gemini API authentication failed. "
-                        "Check your API key and permissions."
-                    )
-                }), 502
-
-            if response.status_code == 404:
-                return jsonify({
-                    "error": (
-                        "Gemini model not found. "
-                        "Check GEMINI_MODEL in Render Environment."
-                    )
-                }), 502
-
+        if response.status_code == 429:
             return jsonify({
                 "error": (
-                    "Gemini request failed. "
-                    "Check the Render application logs."
+                    "Gemini request limit reached. "
+                    "Check your API quota and billing."
+                )
+            }), 429
+
+        if response.status_code in (401, 403):
+            return jsonify({
+                "error": (
+                    "Gemini API authentication failed. "
+                    "Check your API key and permissions."
                 )
             }), 502
 
-        result = response.json()
+        if response.status_code == 404:
+            return jsonify({
+                "error": (
+                    "Gemini model not found. "
+                    "Check GEMINI_MODEL in Render Environment."
+                )
+            }), 502
 
+        if response.status_code in RETRYABLE_STATUSES:
+            return jsonify({
+                "error": (
+                    "Gemini is still busy after several attempts. "
+                    "Please try again shortly."
+                )
+            }), 503
+
+        return jsonify({
+            "error": (
+                "Gemini request failed. "
+                "Check the Render application logs."
+            )
+        }), 502
+
+    try:
+        result = response.json()
         candidates = result.get("candidates", [])
 
         if not candidates:
-            app.logger.error(
-                "Gemini returned no candidates."
-            )
+            app.logger.error("Gemini returned no candidates.")
 
             return jsonify({
                 "error": (
@@ -282,7 +353,6 @@ Return exactly this JSON structure:
                 "error": "Gemini returned an empty response."
             }), 502
 
-        # Convert the AI response into JSON.
         data = json.loads(output_text)
 
         required_fields = [
@@ -306,23 +376,6 @@ Return exactly this JSON structure:
             for field in required_fields
         })
 
-    except requests.Timeout:
-        app.logger.exception("Gemini request timed out.")
-
-        return jsonify({
-            "error": (
-                "Gemini took too long to respond. "
-                "Please try again."
-            )
-        }), 504
-
-    except requests.RequestException:
-        app.logger.exception("Gemini connection failed.")
-
-        return jsonify({
-            "error": "Could not connect to Gemini."
-        }), 502
-
     except (ValueError, json.JSONDecodeError):
         app.logger.exception(
             "Could not parse the Gemini response."
@@ -333,6 +386,13 @@ Return exactly this JSON structure:
                 "Could not process the AI response. "
                 "Please try again."
             )
+        }), 502
+
+    except requests.RequestException:
+        app.logger.exception("Error processing Gemini response.")
+
+        return jsonify({
+            "error": "Could not process the Gemini response."
         }), 502
 
 
