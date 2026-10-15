@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>SnapVoice AI</title>
+
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+    <header>
+        <h1>SnapVoice AI</h1>
+        <p>Your photo. Your voice. Your creativity.</p>
+    </header>
+
+    <main class="container">
+
+        <section class="upload-card">
+
+            <h2>Turn Your Photo Into a Story</h2>
+
+            <p>
+                Upload a photo to generate captions, hashtags,
+                descriptions and song suggestions.
+            </p>
+
+            <label for="photoInput" class="upload-button">
+                Choose Your Photo
+            </label>
+
+            <input
+                type="file"
+                id="photoInput"
+                accept="image/*"
+                hidden
+            >
+
+            <img id="photoPreview" alt="Selected photo preview">
+
+            <label for="styleSelect">Choose Caption Style</label>
+
+            <select id="styleSelect">
+                <option value="Casual">Casual</option>
+                <option value="Funny">Funny</option>
+                <option value="Aesthetic">Aesthetic</option>
+                <option value="Romantic">Romantic</option>
+                <option value="Professional">Professional</option>
+            </select>
+
+            <button id="generateButton" disabled>
+                Generate My Content
+            </button>
+
+            <p id="status" role="status"></p>
+
+        </section>
+
+        <section class="results-card">
+
+            <h2>Your Generated Content</h2>
+
+            <div class="result">
+                <h3>Caption</h3>
+                <p id="caption">Your caption will appear here.</p>
+                <button class="copy-button" data-target="caption">
+                    Copy Caption
+                </button>
+            </div>
+
+            <div class="result">
+                <h3>Hashtags</h3>
+                <p id="hashtags">Your hashtags will appear here.</p>
+                <button class="copy-button" data-target="hashtags">
+                    Copy Hashtags
+                </button>
+            </div>
+
+            <div class="result">
+                <h3>Photo Description</h3>
+                <p id="description">
+                    Your photo description will appear here.
+                </p>
+                <button class="copy-button" data-target="description">
+                    Copy Description
+                </button>
+            </div>
+
+            <div class="result">
+                <h3>Song Suggestion</h3>
+                <p id="song">Your song suggestion will appear here.</p>
+                <button class="copy-button" data-target="song">
+                    Copy Song Suggestion
+                </button>
+            </div>
+
+        </section>
+
+    </main>
+
+    <footer>
+        <p>SnapVoice AI — Create. Express. Inspire.</p>
+    </footer>
+
+    <script src="script.js"></script>
+
+</body>
+</html>
