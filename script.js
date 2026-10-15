@@ -1,3 +1,5 @@
+const BACKEND_URL = "https://snapvoicee-ai.onrender.com";
+
 const photoInput = document.getElementById("photoInput");
 const photoPreview = document.getElementById("photoPreview");
 const generateButton = document.getElementById("generateButton");
@@ -5,30 +7,36 @@ const statusText = document.getElementById("status");
 
 let selectedPhoto = null;
 
+// Select and preview a photo
 photoInput.addEventListener("change", function () {
     const file = photoInput.files[0];
 
     if (!file) {
+        selectedPhoto = null;
+        generateButton.disabled = true;
         return;
     }
 
     if (!file.type.startsWith("image/")) {
         statusText.textContent = "Please select an image.";
+        photoInput.value = "";
+        selectedPhoto = null;
+        generateButton.disabled = true;
         return;
     }
 
-    if (file.size > 10 * 1024 * 1024) {
+    if (file.size > 5 * 1024 * 1024) {
         statusText.textContent =
-            "Please select an image smaller than 10 MB.";
+            "Please select an image smaller than 5 MB.";
         photoInput.value = "";
+        selectedPhoto = null;
+        generateButton.disabled = true;
         return;
     }
 
     selectedPhoto = file;
 
-    const imageURL = URL.createObjectURL(file);
-
-    photoPreview.src = imageURL;
+    photoPreview.src = URL.createObjectURL(file);
     photoPreview.style.display = "block";
 
     generateButton.disabled = false;
@@ -37,46 +45,78 @@ photoInput.addEventListener("change", function () {
         "Photo selected successfully. Ready to generate!";
 });
 
-generateButton.addEventListener("click", function () {
+// Generate content using the AI backend
+generateButton.addEventListener("click", async function () {
     if (!selectedPhoto) {
         statusText.textContent = "Please select a photo first.";
         return;
     }
 
-    const style = document.getElementById("styleSelect").value;
+    const styleSelect = document.getElementById("styleSelect");
+    const formData = new FormData();
 
-    const captions = {
-        Casual: "Just enjoying the little moments ✨",
-        Funny: "Proof that I occasionally look good 😂",
-        Aesthetic: "Lost in the beauty of this moment 🌿",
-        Romantic: "Some moments feel like a beautiful dream ❤️",
-        Professional: "Capturing a moment worth remembering."
-    };
+    formData.append("photo", selectedPhoto);
+    formData.append("style", styleSelect.value);
 
-    document.getElementById("caption").textContent =
-        captions[style];
-
-    document.getElementById("hashtags").textContent =
-        "#SnapVoice #PhotoOfTheDay #GoodVibes #Memories";
-
-    document.getElementById("description").textContent =
-        "A photo selected by the user. The full AI photo analysis " +
-        "feature will be connected in the next development stage.";
-
-    document.getElementById("song").textContent =
-        "Suggested mood: Relaxed. Suggested genre: Lo-fi.";
-
+    generateButton.disabled = true;
     statusText.textContent =
-        "Demo content generated successfully!";
+        "AI is analyzing your photo. Please wait...";
+
+    try {
+        const response = await fetch(
+            `${BACKEND_URL}/generate`,
+            {
+                method: "POST",
+                body: formData
+            }
+        );
+
+        const data = await response.json();
+
+        if (!response.ok) {
+            throw new Error(
+                data.error || "AI content generation failed."
+            );
+        }
+
+        document.getElementById("caption").textContent =
+            data.caption;
+
+        document.getElementById("hashtags").textContent =
+            data.hashtags;
+
+        document.getElementById("description").textContent =
+            data.description;
+
+        document.getElementById("song").textContent =
+            data.song;
+
+        statusText.textContent =
+            "Success! Your AI content is ready.";
+
+    } catch (error) {
+        console.error("SnapVoice AI error:", error);
+
+        statusText.textContent =
+            error.message ||
+            "Unable to connect. Please try again.";
+    } finally {
+        generateButton.disabled = false;
+    }
 });
 
+// Copy generated content
 document.querySelectorAll(".copy-button").forEach(function (button) {
     button.addEventListener("click", async function () {
         const target = document.getElementById(button.dataset.target);
-        const text = target.textContent;
+
+        if (!target) {
+            statusText.textContent = "Content not found.";
+            return;
+        }
 
         try {
-            await navigator.clipboard.writeText(text);
+            await navigator.clipboard.writeText(target.textContent);
             statusText.textContent = "Copied successfully!";
         } catch (error) {
             statusText.textContent =
