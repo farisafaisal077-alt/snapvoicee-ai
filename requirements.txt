@@ -1,5 +1,6 @@
 Flask
 flask-cors
-requests
 Pillow
+requests
+python-dotenv
 gunicorn
